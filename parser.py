@@ -6,7 +6,7 @@ from pathlib import Path
 logger = logging.getLogger(__name__)
 
 CONFIG_FILE = "config.json"
-DEFAULT_API  = "69b6f9b83d01cb2096d874bf"
+DEFAULT_API  = "69b7058e3d01cb2096d890ab"
 
 # ─── Config ───────────────────────────────────────────────────────────────────
 def get_api() -> str:
