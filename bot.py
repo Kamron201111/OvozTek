@@ -72,12 +72,13 @@ def is_admin(user_id: int) -> bool:
 
 def admin_only(func):
     """Decorator — faqat admin uchun."""
-    async def wrapper(msg: types.Message, *args, **kwargs):
+    import functools
+    @functools.wraps(func)
+    async def wrapper(msg: types.Message, **kwargs):
         if not is_admin(msg.from_user.id):
             await msg.answer("❌ Bu buyruq faqat admin uchun!")
             return
-        return await func(msg, *args, **kwargs)
-    wrapper.__name__ = func.__name__
+        return await func(msg, **kwargs)
     return wrapper
 
 # ─── /start ───────────────────────────────────────────────────────────────────
