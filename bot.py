@@ -13,7 +13,7 @@ from aiogram.fsm.state import State, StatesGroup
 from aiogram.fsm.storage.memory import MemoryStorage
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 
-from parser import fetch_page
+from parser import fetch_page, get_api
 from db import init_db, add_votes, search_phone, count_votes, get_all_votes, clear_votes, get_stats
 
 # ─── Logging ──────────────────────────────────────────────────────────────────
@@ -39,8 +39,8 @@ scheduler = AsyncIOScheduler(timezone="Asia/Tashkent")
 
 # ─── FSM ──────────────────────────────────────────────────────────────────────
 class Form(StatesGroup):
-    search  = State()
-    new_api = State()
+    search        = State()
+    new_api       = State()
     confirm_clear = State()
 
 # ─── Klaviatura ───────────────────────────────────────────────────────────────
@@ -74,9 +74,6 @@ def confirm_kb():
 def is_admin(uid: int) -> bool:
     return uid == ADMIN_ID
 
-# MUHIM: @admin_only dekorator ishlatilmaydi — FSMContext bilan konflikt qiladi.
-# Har bir handler ichida `if not is_admin(...)` tekshiriladi.
-
 # ─── /start ───────────────────────────────────────────────────────────────────
 @dp.message(Command("start"))
 async def cmd_start(msg: types.Message, state: FSMContext):
@@ -96,37 +93,49 @@ async def cmd_start(msg: types.Message, state: FSMContext):
 async def load_votes(msg: types.Message):
     if not is_admin(msg.from_user.id):
         return
-    status = await msg.answer("⏳ Yuklanmoqda, kuting...")
+
+    status = await msg.answer(
+        f"⏳ Yuklanmoqda...\n"
+        f"🔗 API: <code>{get_api()}</code>",
+        parse_mode="HTML",
+    )
     total  = 0
     errors = 0
 
-    for page in range(0, 1000):
+    for page in range(0, 2000):
         try:
             votes = fetch_page(page)
         except Exception as e:
-            logger.error(f"Page {page} xato: {e}")
+            logger.error(f"Page {page} kutilmagan xato: {e}")
             errors += 1
             if errors >= 5:
+                logger.warning("5 ta xato — yuklash to'xtatildi.")
                 break
             continue
 
         if not votes:
+            # Bo'sh sahifa = barcha ovozlar yuklandi
             break
 
-        added   = add_votes(votes)
-        total  += added
-        errors  = 0
+        added  = add_votes(votes)
+        total += added
+        errors = 0
 
-        if page > 0 and page % 20 == 0:
+        # Har 10 sahifada progress ko'rsat
+        if page > 0 and page % 10 == 0:
             try:
-                await status.edit_text(f"⏳ {page}-sahifa... {total} ta yangi ovoz")
+                await status.edit_text(
+                    f"⏳ {page}-sahifa yuklanmoqda...\n"
+                    f"🆕 Yangi ovozlar: {total} ta",
+                )
             except Exception:
                 pass
 
     await status.edit_text(
-        f"✅ Yuklash tugadi!\n"
-        f"🆕 Yangi ovozlar: {total} ta\n"
-        f"💾 Bazada jami: {count_votes()} ta"
+        f"✅ Yuklash tugadi!\n\n"
+        f"🆕 Yangi saqlangan: <b>{total}</b> ta\n"
+        f"💾 Bazada jami: <b>{count_votes():,}</b> ta",
+        parse_mode="HTML",
     )
 
 # ─── Qidirish ─────────────────────────────────────────────────────────────────
@@ -177,7 +186,8 @@ async def show_stat(msg: types.Message):
         f"📊 <b>Statistika</b>\n\n"
         f"🗳 Jami ovozlar: <b>{s['total']:,}</b>\n"
         f"📅 Eng yangi:    <b>{s['latest'] or 'Mavjud emas'}</b>\n"
-        f"📅 Eng eski:     <b>{s['oldest'] or 'Mavjud emas'}</b>",
+        f"📅 Eng eski:     <b>{s['oldest'] or 'Mavjud emas'}</b>\n\n"
+        f"🔗 Faol API: <code>{get_api()}</code>",
         parse_mode="HTML",
     )
 
@@ -190,7 +200,11 @@ async def send_excel(msg: types.Message):
     try:
         data = get_all_votes()
         if not data:
-            await wait.edit_text("❌ Bazada ma'lumot yo'q. Avval 📥 Yuklash bosing.")
+            await wait.edit_text(
+                "❌ Bazada ma'lumot yo'q.\n"
+                "Avval <b>📥 Yuklash</b> ni bosing.",
+                parse_mode="HTML",
+            )
             return
         df = pd.DataFrame(data, columns=["Telefon", "Sana"])
         path = "/tmp/ovozlar.xlsx"
@@ -198,7 +212,8 @@ async def send_excel(msg: types.Message):
         await wait.delete()
         await msg.answer_document(
             types.FSInputFile(path, filename="ovozlar.xlsx"),
-            caption=f"📄 Jami {len(data):,} ta ovoz",
+            caption=f"📄 Jami <b>{len(data):,}</b> ta ovoz",
+            parse_mode="HTML",
         )
     except Exception as e:
         logger.error(f"Excel xato: {e}")
@@ -209,7 +224,13 @@ async def send_excel(msg: types.Message):
 async def admin_panel(msg: types.Message):
     if not is_admin(msg.from_user.id):
         return
-    await msg.answer("⚙️ <b>Admin panel</b>", parse_mode="HTML", reply_markup=admin_kb())
+    await msg.answer(
+        f"⚙️ <b>Admin panel</b>\n\n"
+        f"🔗 Faol API: <code>{get_api()}</code>\n"
+        f"💾 Bazada: <b>{count_votes():,}</b> ta ovoz",
+        parse_mode="HTML",
+        reply_markup=admin_kb(),
+    )
 
 @dp.message(F.text == "◀️ Orqaga")
 async def back_main(msg: types.Message, state: FSMContext):
@@ -224,7 +245,12 @@ async def ask_api(msg: types.Message, state: FSMContext):
     if not is_admin(msg.from_user.id):
         return
     await state.set_state(Form.new_api)
-    await msg.answer("🔑 Yangi API ID ni yuboring:")
+    await msg.answer(
+        f"🔑 Hozirgi API: <code>{get_api()}</code>\n\n"
+        f"Yangi API ID ni yuboring:\n"
+        f"(openbudget.uz Network tab dan oling)",
+        parse_mode="HTML",
+    )
 
 @dp.message(Form.new_api)
 async def save_api(msg: types.Message, state: FSMContext):
@@ -237,7 +263,9 @@ async def save_api(msg: types.Message, state: FSMContext):
             json.dump({"api": new_api}, f)
         await state.clear()
         await msg.answer(
-            f"✅ API yangilandi!\n<code>{new_api}</code>",
+            f"✅ API yangilandi!\n\n"
+            f"Yangi API: <code>{new_api}</code>\n\n"
+            f"Endi <b>📥 Yuklash</b> bosing.",
             parse_mode="HTML",
             reply_markup=admin_kb(),
         )
@@ -251,7 +279,7 @@ async def ask_clear(msg: types.Message, state: FSMContext):
         return
     await state.set_state(Form.confirm_clear)
     await msg.answer(
-        "⚠️ Haqiqatan ham bazani to'liq tozalamoqchimisiz?\n"
+        f"⚠️ Haqiqatan ham bazani to'liq tozalamoqchimisiz?\n"
         f"Bazada hozir <b>{count_votes():,}</b> ta ovoz bor.",
         parse_mode="HTML",
         reply_markup=confirm_kb(),
@@ -282,14 +310,15 @@ async def restart_bot(msg: types.Message):
     await msg.answer("🔄 Qayta ishga tushirilmoqda...", reply_markup=main_kb())
     os.kill(os.getpid(), signal.SIGTERM)
 
-# ─── Auto-update ──────────────────────────────────────────────────────────────
+# ─── Auto-update (har 30 daqiqa) ─────────────────────────────────────────────
 async def auto_update():
+    """Faqat birinchi sahifani tekshiradi — yangi ovozlar bormi."""
     try:
         votes = fetch_page(0)
         if votes:
             added = add_votes(votes)
             if added:
-                logger.info(f"Auto-update: {added} ta yangi ovoz.")
+                logger.info(f"Auto-update: {added} ta yangi ovoz qo'shildi.")
     except Exception as e:
         logger.error(f"Auto-update xato: {e}")
 
@@ -300,7 +329,13 @@ async def on_startup():
     scheduler.start()
     logger.info("Bot ishga tushdi ✅")
     try:
-        await bot.send_message(ADMIN_ID, "🟢 Bot ishga tushdi!")
+        await bot.send_message(
+            ADMIN_ID,
+            f"🟢 Bot ishga tushdi!\n"
+            f"🔗 API: <code>{get_api()}</code>\n"
+            f"💾 Bazada: <b>{count_votes():,}</b> ta ovoz",
+            parse_mode="HTML",
+        )
     except Exception:
         pass
 
