@@ -6,10 +6,8 @@ logger = logging.getLogger(__name__)
 
 DB = "votes.db"
 
-# ─── Connection helper ────────────────────────────────────────────────────────
 @contextmanager
 def get_conn():
-    """Context manager — connection avtomatik yopiladi."""
     conn = sqlite3.connect(DB, check_same_thread=False)
     conn.row_factory = sqlite3.Row
     try:
@@ -22,7 +20,6 @@ def get_conn():
     finally:
         conn.close()
 
-# ─── Init ─────────────────────────────────────────────────────────────────────
 def init_db():
     with get_conn() as conn:
         conn.execute("""
@@ -30,17 +27,17 @@ def init_db():
                 id    INTEGER PRIMARY KEY AUTOINCREMENT,
                 phone TEXT NOT NULL,
                 date  TEXT,
-                UNIQUE(phone)
+                UNIQUE(phone, date)
             )
         """)
         conn.execute("CREATE INDEX IF NOT EXISTS idx_phone ON votes(phone)")
     logger.info("DB tayyor ✅")
 
-# ─── Add votes (dublikat o'tkazib yuboradi) ───────────────────────────────────
 def add_votes(votes: list[tuple]) -> int:
     """
-    votes: [(phone, date), ...]
-    Qaytaradi: qo'shilgan yangi yozuvlar soni
+    Bir odam bir xil sana bilan ikki marta saqlanmaydi.
+    Lekin bir odam turli sanada ovoz bergan bo'lsa — hammasi saqlanadi.
+    Qaytaradi: qo'shilgan yangi yozuvlar soni.
     """
     if not votes:
         return 0
@@ -51,26 +48,19 @@ def add_votes(votes: list[tuple]) -> int:
         )
         return cur.rowcount
 
-# ─── Search ───────────────────────────────────────────────────────────────────
 def search_phone(last_digits: str) -> list[tuple]:
-    """
-    Oxirgi N raqam bo'yicha qidiradi.
-    Qaytaradi: [(phone, date), ...] — maksimal 50 ta natija
-    """
+    """Oxirgi N raqam bo'yicha qidiradi. Maksimal 50 ta natija."""
     with get_conn() as conn:
         cur = conn.execute(
-            "SELECT phone, date FROM votes WHERE phone LIKE ? LIMIT 50",
+            "SELECT phone, date FROM votes WHERE phone LIKE ? ORDER BY date DESC LIMIT 50",
             (f"%{last_digits}",),
         )
         return [(row["phone"], row["date"]) for row in cur.fetchall()]
 
-# ─── Count ────────────────────────────────────────────────────────────────────
 def count_votes() -> int:
     with get_conn() as conn:
-        cur = conn.execute("SELECT COUNT(*) FROM votes")
-        return cur.fetchone()[0]
+        return conn.execute("SELECT COUNT(*) FROM votes").fetchone()[0]
 
-# ─── Stats ────────────────────────────────────────────────────────────────────
 def get_stats() -> dict:
     with get_conn() as conn:
         total  = conn.execute("SELECT COUNT(*) FROM votes").fetchone()[0]
@@ -78,13 +68,11 @@ def get_stats() -> dict:
         oldest = conn.execute("SELECT MIN(date) FROM votes").fetchone()[0]
     return {"total": total, "latest": latest, "oldest": oldest}
 
-# ─── Get all ──────────────────────────────────────────────────────────────────
 def get_all_votes() -> list[tuple]:
     with get_conn() as conn:
-        cur = conn.execute("SELECT phone, date FROM votes ORDER BY id DESC")
+        cur = conn.execute("SELECT phone, date FROM votes ORDER BY date DESC")
         return [(row["phone"], row["date"]) for row in cur.fetchall()]
 
-# ─── Clear ────────────────────────────────────────────────────────────────────
 def clear_votes():
     with get_conn() as conn:
         conn.execute("DELETE FROM votes")
