@@ -1,16 +1,15 @@
 import json
 import logging
+import time
 import requests
 from pathlib import Path
 
 logger = logging.getLogger(__name__)
 
 CONFIG_FILE = "config.json"
-DEFAULT_API  = "69b7058e3d01cb2096d890ab"
+DEFAULT_API = "69b7058e3d01cb2096d890ab"
 
-# ─── Config ───────────────────────────────────────────────────────────────────
 def get_api() -> str:
-    """config.json dan API ID o'qiydi. Fayl yo'q bo'lsa default qaytaradi."""
     try:
         path = Path(CONFIG_FILE)
         if path.exists():
@@ -23,34 +22,44 @@ def get_api() -> str:
         logger.warning(f"config.json o'qishda xatolik: {e}")
     return DEFAULT_API
 
-# ─── Fetch ────────────────────────────────────────────────────────────────────
 def fetch_page(page: int, size: int = 50) -> list[tuple]:
-    """
-    OpenBudget API dan bir sahifani oladi.
-    Qaytaradi: [(phone, date), ...] yoki [] (xatolik/oxiri bo'lsa)
-    """
-    api = get_api()
-    url = f"https://openbudget.uz/api/v2/info/votes/{api}"
+    api    = get_api()
+    url    = f"https://openbudget.uz/api/v2/info/votes/{api}"
     params = {"page": page, "size": size}
 
-    try:
-        resp = requests.get(url, params=params, timeout=15)
-        resp.raise_for_status()
-        data = resp.json()
-    except requests.exceptions.Timeout:
-        logger.warning(f"Sahifa {page}: so'rov vaqti tugadi (timeout).")
-        return []
-    except requests.exceptions.HTTPError as e:
-        logger.warning(f"Sahifa {page}: HTTP xatolik — {e}")
-        return []
-    except requests.exceptions.RequestException as e:
-        logger.error(f"Sahifa {page}: tarmoq xatolik — {e}")
-        return []
-    except ValueError as e:
-        logger.error(f"Sahifa {page}: JSON parse xatolik — {e}")
+    data = None
+    for attempt in range(1, 4):
+        try:
+            resp = requests.get(
+                url, params=params,
+                timeout=30,
+                headers={"User-Agent": "Mozilla/5.0", "Accept": "application/json"},
+            )
+            resp.raise_for_status()
+            data = resp.json()
+            break
+        except requests.exceptions.Timeout:
+            logger.warning(f"Sahifa {page}: timeout (urinish {attempt}/3)")
+            if attempt < 3:
+                time.sleep(2 * attempt)
+            else:
+                return []
+        except requests.exceptions.HTTPError as e:
+            logger.warning(f"Sahifa {page}: HTTP xato — {e}")
+            return []
+        except requests.exceptions.RequestException as e:
+            logger.error(f"Sahifa {page}: tarmoq xato — {e}")
+            if attempt < 3:
+                time.sleep(3)
+            else:
+                return []
+        except ValueError as e:
+            logger.error(f"Sahifa {page}: JSON parse xato — {e}")
+            return []
+
+    if data is None:
         return []
 
-    # Turli API javob formatlarini qo'llab-quvvatlash
     content = None
     if isinstance(data, dict):
         content = data.get("content") or data.get("data") or data.get("items")
@@ -58,18 +67,18 @@ def fetch_page(page: int, size: int = 50) -> list[tuple]:
         content = data
 
     if not content:
-        return []  # bo'sh sahifa = oxirgi
+        return []
 
     votes = []
     for item in content:
         try:
             phone = item.get("phoneNumber") or item.get("phone", "")
-            date  = item.get("voteDate")  or item.get("date",  "")
+            date  = item.get("voteDate")    or item.get("date",  "")
             if phone:
                 votes.append((str(phone), str(date)))
         except Exception as e:
-            logger.debug(f"Item parse xatolik: {e} — {item}")
+            logger.debug(f"Item parse xato: {e}")
             continue
 
-    logger.debug(f"Sahifa {page}: {len(votes)} ta ovoz olindi.")
+    logger.info(f"Sahifa {page}: {len(votes)} ta ovoz olindi.")
     return votes
