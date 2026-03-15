@@ -1,16 +1,23 @@
-
 import requests
+import json
 
-BASE = "https://openbudget.uz/api/v2/info/votes/69b6f9b83d01cb2096d874bf"
+def get_api():
+    with open("config.json") as f:
+        config = json.load(f)
+    return config["api"]
 
 def fetch_page(page):
-    url = f"{BASE}?page={page}&size=12"
+    api = get_api()
+    url = f"https://openbudget.uz/api/v2/info/votes/{api}?page={page}&size=12"
+
     try:
         r = requests.get(url, timeout=10)
         data = r.json()
-        out = []
+
+        votes = []
         for v in data["content"]:
-            out.append((v["phoneNumber"], v["voteDate"]))
-        return out
+            votes.append((v["phoneNumber"], v["voteDate"]))
+
+        return votes
     except:
         return []
