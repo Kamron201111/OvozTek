@@ -2,11 +2,12 @@ import os
 import logging
 import asyncio
 import json
+import signal
 import pandas as pd
 
-from aiogram import Bot, Dispatcher, types
+from aiogram import Bot, Dispatcher, types, F
 from aiogram.types import ReplyKeyboardMarkup, KeyboardButton
-from aiogram.filters import Command, StateFilter
+from aiogram.filters import Command
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.fsm.storage.memory import MemoryStorage
@@ -15,215 +16,218 @@ from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from parser import fetch_page
 from db import init_db, add_votes, search_phone, count_votes, get_all_votes, clear_votes, get_stats
 
-# ─── Logging ─────────────────────────────────────────────────────────────────
+# ─── Logging ──────────────────────────────────────────────────────────────────
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s [%(levelname)s] %(message)s",
 )
 logger = logging.getLogger(__name__)
 
-# ─── Config ───────────────────────────────────────────────────────────────────
+# ─── Env ──────────────────────────────────────────────────────────────────────
 BOT_TOKEN = os.getenv("BOT_TOKEN")
-ADMIN_ID   = int(os.getenv("ADMIN_ID", "0"))
+ADMIN_ID  = int(os.getenv("ADMIN_ID", "0"))
 
 if not BOT_TOKEN:
-    raise RuntimeError("BOT_TOKEN muhit o'zgaruvchisi o'rnatilmagan!")
+    raise RuntimeError("BOT_TOKEN o'rnatilmagan!")
 if not ADMIN_ID:
-    raise RuntimeError("ADMIN_ID muhit o'zgaruvchisi o'rnatilmagan!")
+    raise RuntimeError("ADMIN_ID o'rnatilmagan!")
 
-# ─── Bot & Dispatcher ─────────────────────────────────────────────────────────
+# ─── Bot ──────────────────────────────────────────────────────────────────────
 bot       = Bot(token=BOT_TOKEN)
-storage   = MemoryStorage()
-dp        = Dispatcher(storage=storage)
+dp        = Dispatcher(storage=MemoryStorage())
 scheduler = AsyncIOScheduler(timezone="Asia/Tashkent")
 
-# ─── FSM ─────────────────────────────────────────────────────────────────────
-class SearchState(StatesGroup):
-    waiting_phone = State()
+# ─── FSM ──────────────────────────────────────────────────────────────────────
+class Form(StatesGroup):
+    search  = State()
+    new_api = State()
+    confirm_clear = State()
 
-class ApiState(StatesGroup):
-    waiting_api = State()
-
-# ─── Keyboard ─────────────────────────────────────────────────────────────────
-def main_menu():
-    kb = ReplyKeyboardMarkup(
+# ─── Klaviatura ───────────────────────────────────────────────────────────────
+def main_kb():
+    return ReplyKeyboardMarkup(
         keyboard=[
-            [KeyboardButton(text="📥 Yuklash"),   KeyboardButton(text="🔎 Qidirish")],
-            [KeyboardButton(text="📄 Excel"),      KeyboardButton(text="📊 Statistika")],
+            [KeyboardButton(text="📥 Yuklash"),      KeyboardButton(text="🔎 Qidirish")],
+            [KeyboardButton(text="📄 Excel"),         KeyboardButton(text="📊 Statistika")],
             [KeyboardButton(text="⚙️ Admin panel")],
         ],
         resize_keyboard=True,
     )
-    return kb
 
-def admin_menu():
-    kb = ReplyKeyboardMarkup(
+def admin_kb():
+    return ReplyKeyboardMarkup(
         keyboard=[
             [KeyboardButton(text="🔑 API o'zgartirish"), KeyboardButton(text="🗑 Bazani tozalash")],
-            [KeyboardButton(text="🔄 Restart"),           KeyboardButton(text="◀️ Orqaga")],
+            [KeyboardButton(text="🔄 Restart"),            KeyboardButton(text="◀️ Orqaga")],
         ],
         resize_keyboard=True,
     )
-    return kb
 
-# ─── Helpers ──────────────────────────────────────────────────────────────────
-def is_admin(user_id: int) -> bool:
-    return user_id == ADMIN_ID
+def confirm_kb():
+    return ReplyKeyboardMarkup(
+        keyboard=[[KeyboardButton(text="✅ Ha, tozala"), KeyboardButton(text="❌ Bekor qil")]],
+        resize_keyboard=True,
+        one_time_keyboard=True,
+    )
 
-def admin_only(func):
-    """Decorator — faqat admin uchun."""
-    import functools
-    @functools.wraps(func)
-    async def wrapper(msg: types.Message, **kwargs):
-        if not is_admin(msg.from_user.id):
-            await msg.answer("❌ Bu buyruq faqat admin uchun!")
-            return
-        return await func(msg, **kwargs)
-    return wrapper
+# ─── Helper ───────────────────────────────────────────────────────────────────
+def is_admin(uid: int) -> bool:
+    return uid == ADMIN_ID
+
+# MUHIM: @admin_only dekorator ishlatilmaydi — FSMContext bilan konflikt qiladi.
+# Har bir handler ichida `if not is_admin(...)` tekshiriladi.
 
 # ─── /start ───────────────────────────────────────────────────────────────────
 @dp.message(Command("start"))
 async def cmd_start(msg: types.Message, state: FSMContext):
     await state.clear()
     if not is_admin(msg.from_user.id):
-        await msg.answer("❌ Bu bot faqat admin uchun mo'ljallangan.")
+        await msg.answer("❌ Bu bot faqat admin uchun.")
         return
     await msg.answer(
         "👋 Assalomu alaykum!\n"
         "OpenBudget Ovoz Kuzatuvchi botga xush kelibsiz.\n\n"
-        "Quyidagi tugmalardan foydalaning:",
-        reply_markup=main_menu(),
+        "Tugmalardan birini tanlang:",
+        reply_markup=main_kb(),
     )
 
 # ─── Yuklash ──────────────────────────────────────────────────────────────────
-@dp.message(lambda m: m.text == "📥 Yuklash")
-@admin_only
+@dp.message(F.text == "📥 Yuklash")
 async def load_votes(msg: types.Message):
-    status_msg = await msg.answer("⏳ Yuklanmoqda, iltimos kuting...")
-    total = 0
+    if not is_admin(msg.from_user.id):
+        return
+    status = await msg.answer("⏳ Yuklanmoqda, kuting...")
+    total  = 0
     errors = 0
 
-    for page in range(0, 500):
+    for page in range(0, 1000):
         try:
             votes = fetch_page(page)
         except Exception as e:
-            logger.error(f"Page {page} xatolik: {e}")
+            logger.error(f"Page {page} xato: {e}")
             errors += 1
             if errors >= 5:
-                logger.warning("5 ta ketma-ket xatolik — yuklash to'xtatildi.")
                 break
             continue
 
         if not votes:
-            break  # oxirgi sahifa
+            break
 
-        added = add_votes(votes)
-        total += added
-        errors = 0  # xatolik yo'q, reset
+        added   = add_votes(votes)
+        total  += added
+        errors  = 0
 
-        # Har 50 sahifada progress ko'rsat
-        if page % 50 == 0 and page > 0:
+        if page > 0 and page % 20 == 0:
             try:
-                await status_msg.edit_text(f"⏳ {page}-sahifa... {total} ta yangi ovoz saqlandi.")
+                await status.edit_text(f"⏳ {page}-sahifa... {total} ta yangi ovoz")
             except Exception:
                 pass
 
-    await status_msg.edit_text(
+    await status.edit_text(
         f"✅ Yuklash tugadi!\n"
-        f"📊 Yangi saqlangan ovozlar: {total} ta\n"
-        f"💾 Bazadagi jami ovozlar: {count_votes()} ta"
+        f"🆕 Yangi ovozlar: {total} ta\n"
+        f"💾 Bazada jami: {count_votes()} ta"
     )
 
 # ─── Qidirish ─────────────────────────────────────────────────────────────────
-@dp.message(lambda m: m.text == "🔎 Qidirish")
-@admin_only
+@dp.message(F.text == "🔎 Qidirish")
 async def ask_search(msg: types.Message, state: FSMContext):
-    await state.set_state(SearchState.waiting_phone)
-    await msg.answer("📱 Telefon raqamning oxirgi 4–9 raqamini yuboring:\n\nMisol: <code>901234567</code>", parse_mode="HTML")
+    if not is_admin(msg.from_user.id):
+        return
+    await state.set_state(Form.search)
+    await msg.answer(
+        "📱 Telefon raqamning oxirgi raqamlarini yuboring:\n\n"
+        "Misol: <code>901234567</code> yoki <code>4567</code>",
+        parse_mode="HTML",
+    )
 
-@dp.message(SearchState.waiting_phone)
+@dp.message(Form.search)
 async def do_search(msg: types.Message, state: FSMContext):
     if not is_admin(msg.from_user.id):
         await state.clear()
         return
-
     query = msg.text.strip()
     if not query.isdigit():
         await msg.answer("❌ Faqat raqam yuboring.")
         return
-
     await state.clear()
     results = search_phone(query)
-
     if not results:
-        await msg.answer(f"🔍 <code>{query}</code> bo'yicha hech narsa topilmadi.", parse_mode="HTML")
+        await msg.answer(
+            f"🔍 <code>{query}</code> bo'yicha hech narsa topilmadi.\n"
+            f"Avval <b>📥 Yuklash</b> ni bosing.",
+            parse_mode="HTML",
+            reply_markup=main_kb(),
+        )
         return
-
-    lines = [f"✅ <b>{len(results)} ta natija topildi</b> (<code>{query}</code>):\n"]
-    for phone, date in results[:20]:  # maksimal 20 ta
+    lines = [f"✅ <b>{len(results)} ta natija</b> (<code>{query}</code>):\n"]
+    for phone, date in results[:20]:
         lines.append(f"📞 <code>{phone}</code>  🗓 {date}")
     if len(results) > 20:
-        lines.append(f"\n... va yana {len(results) - 20} ta")
-
-    await msg.answer("\n".join(lines), parse_mode="HTML")
+        lines.append(f"\n... va yana {len(results)-20} ta")
+    await msg.answer("\n".join(lines), parse_mode="HTML", reply_markup=main_kb())
 
 # ─── Statistika ───────────────────────────────────────────────────────────────
-@dp.message(lambda m: m.text == "📊 Statistika")
-@admin_only
+@dp.message(F.text == "📊 Statistika")
 async def show_stat(msg: types.Message):
-    stats = get_stats()
+    if not is_admin(msg.from_user.id):
+        return
+    s = get_stats()
     await msg.answer(
         f"📊 <b>Statistika</b>\n\n"
-        f"🗳 Jami ovozlar: <b>{stats['total']:,}</b>\n"
-        f"📅 Eng yangi ovoz: <b>{stats['latest'] or 'Ma\'lumot yo\'q'}</b>\n"
-        f"📅 Eng eski ovoz: <b>{stats['oldest'] or 'Ma\'lumot yo\'q'}</b>",
+        f"🗳 Jami ovozlar: <b>{s['total']:,}</b>\n"
+        f"📅 Eng yangi:    <b>{s['latest'] or 'Mavjud emas'}</b>\n"
+        f"📅 Eng eski:     <b>{s['oldest'] or 'Mavjud emas'}</b>",
         parse_mode="HTML",
     )
 
 # ─── Excel ────────────────────────────────────────────────────────────────────
-@dp.message(lambda m: m.text == "📄 Excel")
-@admin_only
+@dp.message(F.text == "📄 Excel")
 async def send_excel(msg: types.Message):
-    await msg.answer("⏳ Excel fayl tayyorlanmoqda...")
+    if not is_admin(msg.from_user.id):
+        return
+    wait = await msg.answer("⏳ Excel tayyorlanmoqda...")
     try:
         data = get_all_votes()
         if not data:
-            await msg.answer("❌ Bazada ma'lumot yo'q.")
+            await wait.edit_text("❌ Bazada ma'lumot yo'q. Avval 📥 Yuklash bosing.")
             return
-
         df = pd.DataFrame(data, columns=["Telefon", "Sana"])
-        file_path = "/tmp/ovozlar.xlsx"
-        df.to_excel(file_path, index=False)
-
+        path = "/tmp/ovozlar.xlsx"
+        df.to_excel(path, index=False)
+        await wait.delete()
         await msg.answer_document(
-            types.FSInputFile(file_path, filename="ovozlar.xlsx"),
+            types.FSInputFile(path, filename="ovozlar.xlsx"),
             caption=f"📄 Jami {len(data):,} ta ovoz",
         )
     except Exception as e:
-        logger.error(f"Excel xatolik: {e}")
-        await msg.answer(f"❌ Xatolik yuz berdi: {e}")
+        logger.error(f"Excel xato: {e}")
+        await wait.edit_text(f"❌ Xato: {e}")
 
 # ─── Admin panel ──────────────────────────────────────────────────────────────
-@dp.message(lambda m: m.text == "⚙️ Admin panel")
-@admin_only
+@dp.message(F.text == "⚙️ Admin panel")
 async def admin_panel(msg: types.Message):
-    await msg.answer("⚙️ <b>Admin panel</b>", parse_mode="HTML", reply_markup=admin_menu())
+    if not is_admin(msg.from_user.id):
+        return
+    await msg.answer("⚙️ <b>Admin panel</b>", parse_mode="HTML", reply_markup=admin_kb())
 
-@dp.message(lambda m: m.text == "◀️ Orqaga")
-@admin_only
-async def back_to_main(msg: types.Message, state: FSMContext):
+@dp.message(F.text == "◀️ Orqaga")
+async def back_main(msg: types.Message, state: FSMContext):
+    if not is_admin(msg.from_user.id):
+        return
     await state.clear()
-    await msg.answer("🏠 Asosiy menyu", reply_markup=main_menu())
+    await msg.answer("🏠 Asosiy menyu", reply_markup=main_kb())
 
-# API o'zgartirish
-@dp.message(lambda m: m.text == "🔑 API o'zgartirish")
-@admin_only
+# ─── API o'zgartirish ─────────────────────────────────────────────────────────
+@dp.message(F.text == "🔑 API o'zgartirish")
 async def ask_api(msg: types.Message, state: FSMContext):
-    await state.set_state(ApiState.waiting_api)
+    if not is_admin(msg.from_user.id):
+        return
+    await state.set_state(Form.new_api)
     await msg.answer("🔑 Yangi API ID ni yuboring:")
 
-@dp.message(ApiState.waiting_api)
-async def set_api(msg: types.Message, state: FSMContext):
+@dp.message(Form.new_api)
+async def save_api(msg: types.Message, state: FSMContext):
     if not is_admin(msg.from_user.id):
         await state.clear()
         return
@@ -232,56 +236,62 @@ async def set_api(msg: types.Message, state: FSMContext):
         with open("config.json", "w") as f:
             json.dump({"api": new_api}, f)
         await state.clear()
-        await msg.answer(f"✅ API yangilandi: <code>{new_api}</code>", parse_mode="HTML")
+        await msg.answer(
+            f"✅ API yangilandi!\n<code>{new_api}</code>",
+            parse_mode="HTML",
+            reply_markup=admin_kb(),
+        )
     except Exception as e:
-        await msg.answer(f"❌ Xatolik: {e}")
+        await msg.answer(f"❌ Xato: {e}")
 
-# Bazani tozalash
-@dp.message(lambda m: m.text == "🗑 Bazani tozalash")
-@admin_only
-async def confirm_clear(msg: types.Message):
-    kb = ReplyKeyboardMarkup(
-        keyboard=[
-            [KeyboardButton(text="✅ Ha, tozala"), KeyboardButton(text="❌ Yo'q, bekor qil")],
-        ],
-        resize_keyboard=True,
-        one_time_keyboard=True,
+# ─── Bazani tozalash ──────────────────────────────────────────────────────────
+@dp.message(F.text == "🗑 Bazani tozalash")
+async def ask_clear(msg: types.Message, state: FSMContext):
+    if not is_admin(msg.from_user.id):
+        return
+    await state.set_state(Form.confirm_clear)
+    await msg.answer(
+        "⚠️ Haqiqatan ham bazani to'liq tozalamoqchimisiz?\n"
+        f"Bazada hozir <b>{count_votes():,}</b> ta ovoz bor.",
+        parse_mode="HTML",
+        reply_markup=confirm_kb(),
     )
-    await msg.answer("⚠️ Haqiqatan ham bazani to'liq tozalamoqchimisiz?", reply_markup=kb)
 
-@dp.message(lambda m: m.text == "✅ Ha, tozala")
-@admin_only
-async def do_clear(msg: types.Message):
-    try:
-        clear_votes()
-        await msg.answer("🗑 Baza muvaffaqiyatli tozalandi.", reply_markup=admin_menu())
-    except Exception as e:
-        await msg.answer(f"❌ Xatolik: {e}")
+@dp.message(Form.confirm_clear, F.text == "✅ Ha, tozala")
+async def do_clear(msg: types.Message, state: FSMContext):
+    if not is_admin(msg.from_user.id):
+        await state.clear()
+        return
+    clear_votes()
+    await state.clear()
+    await msg.answer("🗑 Baza tozalandi.", reply_markup=admin_kb())
 
-@dp.message(lambda m: m.text == "❌ Yo'q, bekor qil")
-@admin_only
-async def cancel_clear(msg: types.Message):
-    await msg.answer("✅ Bekor qilindi.", reply_markup=admin_menu())
+@dp.message(Form.confirm_clear, F.text == "❌ Bekor qil")
+async def cancel_clear(msg: types.Message, state: FSMContext):
+    if not is_admin(msg.from_user.id):
+        await state.clear()
+        return
+    await state.clear()
+    await msg.answer("✅ Bekor qilindi.", reply_markup=admin_kb())
 
-# Restart
-@dp.message(lambda m: m.text == "🔄 Restart")
-@admin_only
+# ─── Restart ──────────────────────────────────────────────────────────────────
+@dp.message(F.text == "🔄 Restart")
 async def restart_bot(msg: types.Message):
-    await msg.answer("🔄 Bot qayta ishga tushirilmoqda...")
-    import os, signal
+    if not is_admin(msg.from_user.id):
+        return
+    await msg.answer("🔄 Qayta ishga tushirilmoqda...", reply_markup=main_kb())
     os.kill(os.getpid(), signal.SIGTERM)
 
-# ─── Auto-update (scheduler) ──────────────────────────────────────────────────
+# ─── Auto-update ──────────────────────────────────────────────────────────────
 async def auto_update():
-    """Har 30 daqiqada birinchi sahifani yangilaydi."""
     try:
         votes = fetch_page(0)
         if votes:
             added = add_votes(votes)
             if added:
-                logger.info(f"Auto-update: {added} ta yangi ovoz qo'shildi.")
+                logger.info(f"Auto-update: {added} ta yangi ovoz.")
     except Exception as e:
-        logger.error(f"Auto-update xatolik: {e}")
+        logger.error(f"Auto-update xato: {e}")
 
 # ─── Startup / Shutdown ───────────────────────────────────────────────────────
 async def on_startup():
