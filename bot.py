@@ -268,8 +268,8 @@ async def cancel_clear(msg: types.Message):
 @admin_only
 async def restart_bot(msg: types.Message):
     await msg.answer("🔄 Bot qayta ishga tushirilmoqda...")
-    import sys
-    sys.exit(0)  # Railway avtomatik restart qiladi
+    import os, signal
+    os.kill(os.getpid(), signal.SIGTERM)
 
 # ─── Auto-update (scheduler) ──────────────────────────────────────────────────
 async def auto_update():
