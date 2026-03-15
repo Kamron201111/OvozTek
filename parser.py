@@ -7,7 +7,7 @@ from pathlib import Path
 logger = logging.getLogger(__name__)
 
 CONFIG_FILE = "config.json"
-DEFAULT_API = "69b7058e3d01cb2096d890ab"
+DEFAULT_API = "69b708d53d01cb2096d89700"
 
 def get_api() -> str:
     try:
